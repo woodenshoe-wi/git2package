@@ -1,0 +1,188 @@
+#!/bin/sh
+
+# load config file if it exists
+[ -f ./git2package.conf ] && . ./git2package.conf
+
+# try to find a terminal emulator
+if command -v urxvt >/dev/null 2>&1; then
+  term_cmnd=${TERMINAL_COMMAND:-urxvt}
+elif command -v rxvt >/dev/null 2>&1; then
+  term_cmnd=${TERMINAL_COMMAND:-rxvt}
+elif command -v lxterminal >/dev/null 2>&1; then
+  term_cmnd=${TERMINAL_COMMAND:-lxterminal}
+elif command -v xterm >/dev/null 2>&1; then
+  term_cmnd=${TERMINAL_COMMAND:-xterm}
+elif command -v konsole >/dev/null 2>&1; then
+  term_cmnd=${TERMINAL_COMMAND:-konsole}
+elif command -v gnome-terminal >/dev/null 2>&1; then
+  term_cmnd=${TERMINAL_COMMAND:-gnome-terminal}
+fi
+
+# some versions of Puppy have different versions of gtkdialog,
+# this makes it easier to switch between versions for testing
+if command -v gtkdialog >/dev/null 2>&1; then
+  gtkdialog_cmnd=${GTKDIALOG_COMMAND:-gtkdialog}
+elif command -v gtkdialog4 >/dev/null 2>&1; then
+  gtkdialog_cmnd=${GTKDIALOG_COMMAND:-gtkdialog4}
+elif command -v gtkdialog3 >/dev/null 2>&1; then
+  gtkdialog_cmnd=${GTKDIALOG_COMMAND:-gtkdialog3}
+fi
+
+# set default working directory and output directory
+work_dir=${WORK_DIR:-/tmp/git2package}
+output_dir=${OUTPUT_DIR:-~}
+
+# if edit-config is run with the --new option it writes
+# all defaults to git2package.conf and exits
+if [ "$1" = '--new' ]; then
+  {
+    echo "# This is the config file for the git2package Rox AppDir."
+    echo
+    echo "TERMINAL_COMMAND=\"${term_cmnd}\""
+    echo "GTKDIALOG_COMMAND=\"${gtkdialog_cmnd}\""
+    echo "WORK_DIR=\"${work_dir}\""
+    echo "OUTPUT_DIR=\"${output_dir}\""
+  } > git2package.conf
+  exit
+fi
+
+# reusable function to make the LABEL VARIABLE pairs for the dialog box
+configvar () {
+  echo '  <hbox homogeneous="true">
+    <text><label>'"$1"'</label></text>
+    <entry>
+      <default>'"$2"'</default>
+      <variable>'"$1"'</variable>
+    </entry>
+  </hbox>'
+}
+
+# beginning of dialog box definition
+CONFIG_DIALOG='<window title="git2package">
+<vbox>
+'$(configvar TERMINAL_COMMAND "${term_cmnd}")'
+'$(configvar GTKDIALOG_COMMAND "${gtkdialog_cmnd}")'
+'$(configvar WORK_DIR "${work_dir}")'
+'$(configvar OUTPUT_DIR "${output_dir}")'
+  <frame Recipe repos>
+    <text width-request="300">
+      <label>Enter URL of Recipe repo.  (http(s) only please.)</label>
+    </text>
+    <comboboxentry has-focus="true">
+      <variable>ComboBoxEntry</variable>
+      <input file>./recipe-repos.conf.new</input>
+      <output file>./recipe-repos.conf.new</output>
+      <action signal="activate">save:ComboBoxEntry</action>
+      <action signal="activate">refresh:ComboBoxEntry</action>
+    </comboboxentry>
+    <button>
+      <label>Delete selected entry</label>
+      <action>removeselected:ComboBoxEntry</action>
+      <action>save:ComboBoxEntry</action>
+      <action>refresh:ComboBoxEntry</action>
+    </button>
+  </frame>
+  <hbox>
+    <button ok>
+      <action>save:ComboBoxEntry</action>
+      <action>exit:OK</action>
+    </button>
+    <button cancel></button>
+  </hbox>
+</vbox>
+</window>'
+export CONFIG_DIALOG
+
+# Uncomment the following line to see the finished dialog in the terminal.
+# echo "${CONFIG_DIALOG}"
+
+cp recipe-repos.conf recipe-repos.conf.new
+config_result=$(${gtkdialog_cmnd} --program=CONFIG_DIALOG)
+
+# Uncomment the following line to see any errors for debugging.
+# echo "${config_result}"
+
+# make sure the OK button was clicked
+if [ "$(echo "${config_result}" | grep '^EXIT=')" = 'EXIT="OK"' ]; then
+
+  mv recipe-repos.conf.new recipe-repos.conf
+  # When gtkdialog saves ComboBoxEntry values,
+  # the last entry is missing a newline.
+  echo >> recipe-repos.conf
+
+  # if GTKDIALOG_COMMAND was changed, make sure the new one works
+  new_gtkdialog_string=$(echo "${config_result}" \
+    | grep '^GTKDIALOG_COMMAND=')
+  cur_gtkdialog_string="GTKDIALOG_COMMAND=\"${gtkdialog_cmnd}\""
+
+  if [ "${new_gtkdialog_string}" != "${cur_gtkdialog_string}" ]; then
+
+    test_gtkdialog_cmnd=$( \
+      expr "${new_gtkdialog_string}" : 'GTKDIALOG_COMMAND=\"\(.*\)\"')
+
+    TEST_DIALOG='<vbox>
+  <text>
+    <label>This is a test dialog to make sure that the GTKDIALOG_COMMAND '
+    TEST_DIALOG=${TEST_DIALOG}'chosen works.  Just click OK.</label>
+  </text>
+  <hbox><button ok></button></hbox></vbox>'
+
+    export TEST_DIALOG
+
+    test_result=$(${test_gtkdialog_cmnd} --program=TEST_DIALOG)
+
+    if [ "$(echo "${test_result}" | grep '^EXIT=')" != 'EXIT="OK"' ]; then
+      new_gtkdialog_string="GTKDIALOG_COMMAND=\"${gtkdialog_cmnd}\""
+    fi
+  fi
+
+  new_term_string=$(echo "${config_result}" | grep '^TERMINAL_COMMAND=')
+  new_work_string=$(echo "${config_result}" | grep '^WORK_DIR=')
+  new_output_string=$(echo "${config_result}" | grep '^OUTPUT_DIR=')
+
+  # if git2package.conf already exists
+  if [ -e git2package.conf ]; then
+    # update each line in existing file
+    while read -r line ; do
+      if [ "$(expr "${line}" : '\(GTKDIALOG_COMMAND=\).*')" != '' ]; then
+        echo "${new_gtkdialog_string}" >> git2package.conf.new
+      elif [ "$(expr "${line}" : '\(TERMINAL_COMMAND=\).*')" != '' ]; then
+        echo "${new_term_string}" >> git2package.conf.new
+      elif [ "$(expr "${line}" : '\(WORK_DIR=\).*')" != '' ]; then
+        echo "${new_work_string}" >> git2package.conf.new
+      elif [ "$(expr "${line}" : '\(OUTPUT_DIR=\).*')" != '' ]; then
+        echo "${new_output_string}" >> git2package.conf.new
+      else
+        echo "${line}" >> git2package.conf.new
+      fi
+    done < git2package.conf
+
+    [ "$(grep '^GTKDIALOG_COMMAND=' git2package.conf.new)" = '' ] \
+      && echo "${new_gtkdialog_string}" >> git2package.conf.new
+    [ "$(grep '^TERMINAL_COMMAND=' git2package.conf.new)" = '' ] \
+      && echo "${new_term_string}" >> git2package.conf.new
+    [ "$(grep '^WORK_DIR=' git2package.conf.new)" = '' ] \
+      && echo "${new_work_string}" >> git2package.conf.new
+    [ "$(grep '^OUTPUT_DIR=' git2package.conf.new)" = '' ] \
+      && echo "${new_output_string}" >> git2package.conf.new
+
+    mv git2package.conf.new git2package.conf
+
+  else
+    # otherwise write new git2package.conf
+    {
+      echo "# This is the config file for the git2package Rox AppDir."
+      echo
+      echo "${new_term_string}"
+      echo "${new_gtkdialog_string}"
+      echo "${new_work_string}"
+      echo "${new_output_string}"
+    } > git2package.conf
+  fi
+
+  exec ./git2package
+
+elif [ "$(echo "${config_result}" | grep '^EXIT=')" = 'EXIT="Cancel"' ]; then
+  rm recipe-repos.conf.new
+  exec ./git2package
+fi

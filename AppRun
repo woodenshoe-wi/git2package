@@ -1,0 +1,23 @@
+#!/bin/sh
+
+script_path=$(realpath "$0")
+cd "${script_path%/AppRun}" || exit
+
+# TERMINAL_COMMAND and GTKDIALOG_COMMAND are defined in git2package.conf
+[ ! -f ./git2package.conf ] && ./edit-config --new
+. ./git2package.conf
+
+# if running in an OS that doesn't have gtkdialog
+if [ "${GTKDIALOG_COMMAND}" = '' ] && [ "${DISPLAY}" != '' ]; then
+  if [ "${TERMINAL_COMMAND}" != '' ]; then
+
+    # run git2package in a terminal
+    ${TERMINAL_COMMAND} -e sh -c "./git2package
+      echo 'Press <Enter> to continue' ; read var"
+
+  else
+    echo "Please run ./git2package instead." >&2
+  fi
+else
+  ./git2package
+fi

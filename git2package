@@ -1,0 +1,768 @@
+#!/bin/bash
+
+newline='
+'
+
+script_path=$(realpath "$0")
+cd "${script_path%/git2package}" || exit
+export APP_DIR=${script_path%/git2package}
+parent_dir=$(realpath ..)
+
+# load config file if it exists
+[ -f ./git2package.conf ] && . ./git2package.conf
+
+
+terminal () {
+
+  if [ "${DISPLAY}" != '' ] && [ "${TERMINAL_COMMAND}" = '' ]; then
+  # If we were called from gtkdialog,
+  # we have to re-source git2package.conf.
+
+    [ ! -f "${APP_DIR}/git2package.conf" ] \
+      && (cd "${APP_DIR}" || exit ; ./edit-config --new)
+
+    # shellcheck source=./git2package.conf
+    . "${APP_DIR}/git2package.conf"
+  fi
+
+  if [ "${DISPLAY}" != '' ] && [ "${TERMINAL_COMMAND}" != '' ]; then
+    ${TERMINAL_COMMAND} -e sh -c "$* || \
+      (echo 'Press <Enter> to continue' ; read var)"
+  else
+    "$@"
+  fi
+}
+export -f terminal
+
+update_recipe_repos () {
+
+  echo "Updating Recipe Repos"
+
+  while read -r line ; do
+
+    repo_url=${line}
+    repo_name=${repo_url##*/}
+    repo_name=${repo_name%.git}
+    user_name=${repo_url%/*}
+    user_name=${user_name##*/}
+
+    if [ "${user_name}" != '' ]; then
+      echo "${user_name}.${repo_name}"
+      mkdir -p recipes
+      (cd recipes || exit
+        if [ -d "${user_name}.${repo_name}" ]; then
+          (cd "${user_name}.${repo_name}" && terminal \
+            "echo \"${user_name}.${repo_name}\" ; git pull")
+        else
+          terminal "echo \"${user_name}.${repo_name}\"
+            git clone \"${repo_url}\" \"${user_name}.${repo_name}\""
+        fi
+      )
+    fi
+
+  done < recipe-repos.conf
+}
+export -f update_recipe_repos
+
+make_recipe_tree () {
+  for repo_dir in recipes/*
+  do
+    repo_name=${repo_dir#recipes/}
+    for recipe_dir in "${repo_dir}"/*
+    do
+      if [ -d "${recipe_dir}" ]; then
+        recipe_name=${recipe_dir##*/}
+        recipe_file=${recipe_dir}/${recipe_name}.recipe
+        if [ -f "${recipe_file}" ]; then
+          if [ "$1" = '' ] || [ "$1" = "${recipe_name}" ]; then
+            echo "${recipe_file}|${recipe_name}|${repo_name}"
+          fi
+        fi
+      fi
+    done
+  done
+}
+export -f make_recipe_tree
+
+clone_update_repo () {
+
+  repo_location=$(cat "$1")
+
+  repos_list_location=${1##*repo_configs/}
+  recipe_name=${repos_list_location#*/}
+  recipe_name=${recipe_name%/REPO_LOCATION}
+  repos_list_location=${repos_list_location%%/*}/${recipe_name}
+  repos_file="${APP_DIR}/recipes/${repos_list_location}/${recipe_name}.repos"
+
+  if [ ! -f "${repos_file}" ]; then
+    terminal "echo \"git2package: missing ${repos_file##*/} file.\" ; false"
+    return
+  fi
+
+  if [ -d "${repo_location}" ]; then
+    (cd "${repo_location}" || exit
+      current_remotes=$(git remote)
+      while read -r one_remote ; do
+
+        remote_name=${one_remote%/*}
+        remote_name=${remote_name##*/}
+
+        [ "${remote_name}" = '' ] && continue
+
+        if [ "$(echo "${current_remotes}" \
+          | grep -x "${remote_name}")" = '' ]; then
+
+          terminal "echo \"${one_remote}\"
+            read -n1 -p \"Do you want to add ${remote_name} remote? (Y/n):\" var
+            echo
+            case \${var} in
+              y|Y|'') git remote add \"${remote_name}\" \"${one_remote}\" ;;
+            esac"
+        fi
+
+        terminal "echo \"${one_remote}\" ; git fetch ${remote_name}"
+
+      done < "${repos_file}"
+    )
+  else
+    repo_origin_url=$(head -n 1 "${repos_file}")
+    origin_name=${repo_origin_url%/*}
+    origin_name=${origin_name##*/}
+
+    repo_parent_dir=${repo_location%/*}
+    mkdir -p "${repo_parent_dir}"
+    (cd "${repo_parent_dir}" || exit
+
+      terminal "echo \"${repo_location}\"
+        git clone --no-checkout \
+          --origin \"${origin_name}\" \
+          \"${repo_origin_url}\" \
+          \"${repo_location##*/}\""
+    )
+
+    if [ -d "${repo_location}" ]; then
+      (cd "${repo_location}" || exit
+        while read -r one_remote ; do
+
+          if [ "${one_remote}" != "${repo_origin_url}" ]; then
+            remote_name=${one_remote%/*}
+            remote_name=${remote_name##*/}
+            if [ "${remote_name}" != '' ]; then
+              terminal "echo \"${one_remote}\"
+                git remote add -f \"${remote_name}\" \"${one_remote}\""
+            fi
+          fi
+
+        done < "${repos_file}"
+      )
+    fi
+  fi
+
+}
+export -f clone_update_repo
+
+update_branches_file () {
+
+  if [ -f "${1%/BRANCHES}/CHECKOUT" ]; then
+    checkout=$(cat "${1%/BRANCHES}/CHECKOUT")
+  else
+    checkout=''
+  fi
+
+  repo_location=$(cat "${1%/BRANCHES}/REPO_LOCATION")
+
+  if [ ! -d "${repo_location}/.git" ]; then
+    echo > "${APP_DIR}/$1"
+    return
+  fi
+
+  branch_list=$(
+    cd "${repo_location}" || exit
+    git branch -a \
+      | grep -v '/HEAD ->' \
+      | sed 's%[\* ]*%%' \
+      | sed 's% *remotes/%%')
+
+  if [ "$(echo "${branch_list}" | grep -x "${checkout}")" != '' ]; then
+  # ${checkout} is an existing branch, not a commit:
+
+    echo "${checkout}" > "${APP_DIR}/$1"
+    echo "${branch_list}" | grep -x -v "${checkout}" >> "${APP_DIR}/$1"
+
+  else
+    # Try to set default branch
+    default_branch=$(
+      cd "${repo_location}" || exit
+      git branch -a | grep '/HEAD ->')
+    default_branch=${default_branch##*-> }
+
+    if [ "${default_branch}" != '' ]; then
+      echo "${default_branch}" > "${APP_DIR}/$1"
+      echo "${branch_list}" | grep -x -v "${default_branch}" >> "${APP_DIR}/$1"
+    else
+      echo "${branch_list}" > "${APP_DIR}/$1"
+    fi
+  fi
+}
+export -f update_branches_file
+
+get_hash_if_commit () {
+
+  repo_location=$(cat "$1")
+
+  if [ -f "${1%/REPO_LOCATION}/CHECKOUT" ]; then
+    checkout=$(cat "${1%/REPO_LOCATION}/CHECKOUT")
+  else
+    return
+  fi
+
+  branch_list=$(
+    cd "${repo_location}" || exit
+    git branch -a \
+      | grep -v '/HEAD ->' \
+      | sed 's%[\* ]*%%' \
+      | sed 's% *remotes/%%')
+
+  if [ "$(echo "${branch_list}" | grep -x "${checkout}")" = '' ]; then
+  # ${checkout} is not an existing branch,
+    short_hash=$(
+      cd "${repo_location}" || exit
+      git show -s --format='%h' "${checkout}" 2>/dev/null
+    )
+    [ "$?" = '0' ] && echo "${short_hash}"
+  fi
+}
+export -f get_hash_if_commit
+
+check_repo_exists () {
+
+  repo_location=$(cat "$1")
+
+  if [ -d "${repo_location}/.git" ]; then
+    echo 'true'
+  else
+    echo 'false'
+  fi
+
+}
+export -f check_repo_exists
+
+check_valid_checkout () {
+
+  repo_location=$(cat "$1")
+
+  if [ "$2" != '' ]; then
+    checkout=$2
+  elif [ -f "${1%/REPO_LOCATION}/CHECKOUT" ]; then
+    checkout=$(cat "${1%/REPO_LOCATION}/CHECKOUT")
+  else
+    echo 'false'
+    return
+  fi
+
+  branch_list=$(
+    cd "${repo_location}" || exit
+    git branch -a \
+      | grep -v '/HEAD ->' \
+      | sed 's%[\* ]*%%' \
+      | sed 's% *remotes/%%')
+
+  if [ "$(echo "${branch_list}" | grep -x "${checkout}")" != '' ]; then
+  # ${checkout} is a valid branch,
+    echo 'true'
+    return
+  fi
+
+  # ${checkout} is not an existing branch, maybe a commit hash?
+  short_hash=$(
+    cd "${repo_location}" || exit
+    git show -s --format='%h' "${checkout}" 2>/dev/null
+  )
+  if [ "$?" = '0' ]; then
+    echo 'true'
+  else
+    echo 'false'
+  fi
+
+}
+export -f check_valid_checkout
+
+run_recipe () {
+  repo_name=${1#recipes/}
+  repo_name=${repo_name%%/*}
+  recipe_name=${1##*/}
+  recipe_name=${recipe_name%.recipe}
+
+  repo_location_file=repo_configs/${repo_name}/${recipe_name}/REPO_LOCATION
+  checkout_file=repo_configs/${repo_name}/${recipe_name}/CHECKOUT
+
+  repo_location=$(cat "${repo_location_file}")
+  checkout=$(cat "${checkout_file}")
+
+  repo_state=$(
+    cd "${repo_location}" || exit
+    git status | grep 'working tree clean'
+  )
+  if [ "$repo_state" = '' ]; then
+    (cd "${repo_location}" || exit
+      terminal "git status
+        echo
+        echo 'git2package needs the working tree to be clean.'
+        echo 'Please make any changes into a commit.'
+        echo ; false"
+    )
+    return
+  fi
+
+  (cd "${repo_location}" || exit
+    terminal "git checkout ${checkout}"
+  )
+  repo_branch=$(
+    cd "${repo_location}" || exit
+    git status --porcelain=2 --branch | grep '# branch.head'
+  )
+  repo_branch=${repo_branch#*branch.head }
+  repo_oid=$(
+    cd "${repo_location}" || exit
+    git status --porcelain=2 --branch | grep '# branch.oid'
+  )
+  repo_oid=${repo_oid#*branch.oid }
+  if [ "${repo_branch}" != "${checkout}" ]; then
+    if [ "$(echo "${repo_oid}" | grep -e "^${checkout}")" = '' ]; then
+      terminal "echo \"git2package: Error checking out ${checkout}\" ; false"
+      return
+    fi
+  fi
+
+  RECIPE_DIR=${APP_DIR}/recipes/${repo_name}/
+  SOURCE_DIR=${repo_location}
+  export RECIPE_DIR
+  export SOURCE_DIR
+  export OUTPUT_DIR
+  mkdir -p "${WORK_DIR}/${recipe_name}"
+  (cd "${WORK_DIR}/${recipe_name}" || exit
+    terminal "sh ${RECIPE_DIR}/${recipe_name}/${recipe_name}.recipe \
+      | tee ${OUTPUT_DIR}/${recipe_name}_$(date +'%F').log ; false"
+  )
+}
+export -f run_recipe
+
+configure_repo () {
+  repo_name=${1#recipes/}
+  repo_name=${repo_name%%/*}
+  recipe_name=${1##*/}
+  recipe_name=${recipe_name%.recipe}
+  mkdir -p "repo_configs/${repo_name}/${recipe_name}"
+
+  repo_location_file=repo_configs/${repo_name}/${recipe_name}/REPO_LOCATION
+  branches_file=repo_configs/${repo_name}/${recipe_name}/BRANCHES
+  checkout_file=repo_configs/${repo_name}/${recipe_name}/CHECKOUT
+
+  [ ! -f "${repo_location_file}" ] \
+    && echo "${parent_dir}/${recipe_name}" > "${repo_location_file}"
+
+  if [ "$2" != '' ]; then
+    if [ "$(
+      check_valid_checkout "${repo_location_file}" "$2"
+      )" = 'true' ]; then
+
+      run_recipe "$@"
+      exit
+    fi
+  fi
+
+  [ ! -f "${branches_file}" ] \
+    && update_branches_file "${branches_file}"
+
+  if [ "${GTKDIALOG_COMMAND}" != '' ] && [ "${DISPLAY}" != '' ]; then
+    # beginning of dialog box definition
+    CONFIG_DIALOG='<window title="git2package">
+<vbox>
+  <text>
+    <label>Location of '${recipe_name}' repo:</label>
+  </text>
+  <hbox>
+    <entry fs-action="newfolder" fs-folder="'${parent_dir}'" width_chars="50">
+      <variable>RepoLocationEntry</variable>
+      <input file>"'${repo_location_file}'"</input>
+      <output file>"'${repo_location_file}'"</output>
+    </entry>
+    <button>
+      <label>...</label>
+      <action function="fileselect">RepoLocationEntry</action>
+    </button>
+  </hbox>
+  <hbox>
+    <button>
+      <label>Clone / Check for updates</label>
+      <action>save:RepoLocationEntry</action>
+      <action>clone_update_repo "'${repo_location_file}'"</action>
+      <action>update_branches_file "'${branches_file}'"</action>
+      <action>refresh:BranchComboBoxText</action>
+      <action condition="command_is_true(check_repo_exists \"'${repo_location_file}'\")">enable:OkButton</action>
+    </button>
+  </hbox>
+  <hbox>
+    <text>
+      <label>Branch</label>
+    </text>
+    <comboboxtext>
+      <variable>BranchComboBoxText</variable>
+      <input file>"'${branches_file}'"</input>
+      <action signal="show" condition="command_is_true( [ \"${CommitEntry}\" != \"\" ] && echo 1)">disable:BranchComboBoxText</action>
+    </comboboxtext>
+    <text>
+      <label>or Commit</label>
+    </text>
+    <entry>
+      <variable>CommitEntry</variable>
+      <input>get_hash_if_commit "'${repo_location_file}'"</input>
+      <action condition="command_is_true( [ \"${CommitEntry}\" != \"\" ] && echo 1)">disable:BranchComboBoxText</action>
+      <action condition="command_is_true( [ \"${CommitEntry}\" = \"\" ] && echo 1)">enable:BranchComboBoxText</action>
+    </entry>
+  </hbox>
+  <hbox>
+    <button ok>
+      <variable>OkButton</variable>
+      <action signal="show" condition="command_is_false(check_repo_exists \"'${repo_location_file}'\")">disable:OkButton</action>
+      <action>save:RepoLocationEntry</action>
+      <action>exit:OK</action>
+    </button>
+    <button cancel></button>
+  </hbox>
+</vbox>
+</window>'
+    export CONFIG_DIALOG
+
+    # Uncomment the following line to see the finished dialog in the terminal.
+    # echo "${CONFIG_DIALOG}"
+
+    config_result=$(${GTKDIALOG_COMMAND} --program=CONFIG_DIALOG)
+
+    # Uncomment the following line to see any errors for debugging.
+    # echo "${config_result}"
+
+    # make sure the OK button was clicked
+    if [ "$(echo "${config_result}" | grep '^EXIT=')" = 'EXIT="OK"' ]; then
+
+      commit_entry=$(echo "${config_result}" | grep '^CommitEntry=')
+      commit_entry=${commit_entry#CommitEntry=\"}
+      commit_entry=${commit_entry%\"}
+      if [ "${commit_entry}" != '' ]; then
+        if [ "$(
+          check_valid_checkout "${repo_location_file}" "${commit_entry}"
+          )" = 'true' ]; then
+
+          echo "${commit_entry}" > "${checkout_file}"
+          update_branches_file "${branches_file}"
+        fi
+      else
+        branch_cmbbox=$(echo "${config_result}" | grep '^BranchComboBoxText=')
+        branch_cmbbox=${branch_cmbbox#BranchComboBoxText=\"}
+        branch_cmbbox=${branch_cmbbox%\"}
+        echo "${branch_cmbbox}" > "${checkout_file}"
+        update_branches_file "${branches_file}"
+      fi
+
+      run_recipe "$@"
+      exit
+    fi
+
+  else
+  # not using gtkdialog...
+
+    options_list="1 Repo_Location 2 Clone/Update"
+
+    if [ "$(check_repo_exists "${repo_location_file}")" = 'true' ]; then
+      options_list="${options_list} 3 Branch_or_Commit"
+    fi
+
+    if [ "$(check_valid_checkout "${repo_location_file}")" = 'true' ]; then
+      options_list="${options_list} 4 Run_Recipe"
+    fi
+
+    #if [ "$(false)" ]; then
+    if command -v dialog >/dev/null 2>&1; then
+
+      exec 3>&1
+      selection=$(dialog --menu "Configure Repo" 12 30 5 ${options_list} \
+        2>&1 1>&3)
+      exec 3>&-
+    else
+      echo
+      echo "Configure repo..."
+      echo
+      for one_token in ${options_list}
+      do
+        case ${one_token} in
+          [[:digit:]]*) printf "%s" "(${one_token}) " ;;
+                     *) echo "${one_token}" ;;
+        esac
+      done
+      echo
+      echo "Enter number for selection and press <Enter>"
+      read -r selection
+    fi
+    case ${selection} in
+      1) # Repo_Location
+        repo_location=$(cat "${repo_location_file}")
+
+        #if [ "$(false)" ]; then
+        if command -v dialog >/dev/null 2>&1; then
+          exec 3>&1
+          repo_location=$(dialog --dselect "${repo_location}" 10 60 \
+            2>&1 1>&3)
+          exit_status=$?
+          exec 3>&-
+
+          [ "${exit_status}" = '0' ] \
+            && echo "${repo_location}" > "${repo_location_file}"
+        else
+          # read -e does not work in ash
+          read -e -i "${repo_location}" repo_location
+
+          [ "${repo_location}" != '' ] \
+            && echo "${repo_location}" > "${repo_location_file}"
+        fi
+        configure_repo "$@"
+        exit
+        ;;
+      2) # Clone/Update
+        clone_update_repo "${repo_location_file}"
+        update_branches_file "${branches_file}"
+        configure_repo "$@"
+        exit
+        ;;
+      3) # Branch_or_Commit
+        counter=1
+        branch_list=''
+
+        commit_hash=$(get_hash_if_commit "${repo_location_file}")
+        if [ "${commit_hash}" != '' ]; then
+          branch_list="${counter} ${commit_hash}${newline}"
+          counter=$((counter+1))
+        fi
+
+        while read -r line ; do
+          branch_list="${branch_list}${counter} ${line}${newline}"
+          counter=$((counter+1))
+        done < "${branches_file}"
+
+        branch_list="${branch_list}${counter} Use_Commit${newline}"
+
+        #if [ "$(false)" ]; then
+        if command -v dialog >/dev/null 2>&1; then
+          exec 3>&1
+          selection=$(dialog --menu "Select Branch/Commit" \
+            17 60 10 ${branch_list} \
+            2>&1 1>&3)
+          exec 3>&-
+
+        else
+          echo
+          echo "Select Branch/Commit..."
+          echo
+          for one_token in ${branch_list}
+          do
+            case ${one_token} in
+              [[:digit:]]*) printf "%s" "(${one_token}) " ;;
+                         *) echo "${one_token}"  ;;
+            esac
+          done
+          echo
+          echo "Enter number for selection and press <Enter>"
+          read -r selection
+        fi
+
+        selected_branch=$(echo "${branch_list}" \
+          | grep "^${selection} " \
+          | cut -f 2 -d ' ')
+
+        if [ "${selected_branch}" = 'Use_Commit' ]; then
+
+          #if [ "$(false)" ]; then
+          if command -v dialog >/dev/null 2>&1; then
+            exec 3>&1
+            commit_hash=$(dialog --inputbox "Enter commit hash" \
+              7 30 \
+              2>&1 1>&3)
+            exec 3>&-
+
+          else
+            echo
+            echo "Enter commit hash and press <Enter>"
+            read -r commit_hash
+          fi
+
+          repo_location=$(cat "${repo_location_file}")
+          short_hash=$(
+            cd "${repo_location}" || exit
+            git show -s --format='%h' "${commit_hash}" 2>/dev/null
+            )
+          if [ "$?" = '0' ]; then
+            selected_branch="${short_hash}"
+          else
+            selected_branch=''
+
+            #if [ "$(false)" ]; then
+            if command -v dialog >/dev/null 2>&1; then
+              dialog --msgbox "Error: Invalid commit hash." \
+                6 32
+            else
+              echo
+              echo "Error: Invalid commit hash."
+            fi
+          fi
+
+        fi # if 'Use_Commit'
+
+        if [ "${selected_branch}" != '' ]; then
+          echo "${selected_branch}" > "${checkout_file}"
+          update_branches_file "${branches_file}"
+        fi
+
+        configure_repo "$@"
+        exit
+        ;;
+      4) # Run_Recipe
+        run_recipe "$@"
+        exit
+        ;;
+    esac
+  fi
+}
+
+main () {
+
+  [ ! -d recipes ] && update_recipe_repos
+
+  if [ "$1" != '' ]; then
+    case $1 in
+      -u|--update)
+        update_recipe_repos
+        exit
+        ;;
+      *)
+        arg_recipe_matches=$(make_recipe_tree "$1" | cut -f 1 -d '|')
+
+        recipe_match_count=$(printf "%s" "${arg_recipe_matches}" | grep -c "^")
+        if [ "${recipe_match_count}" = '1' ]; then
+          shift
+          configure_repo "${arg_recipe_matches}" "$@"
+          exit
+        fi
+        ;;
+    esac
+  fi
+
+  if [ "${GTKDIALOG_COMMAND}" != '' ] && [ "${DISPLAY}" != '' ]; then
+  # using gtkdialog...
+    MAIN_DIALOG='<window title="git2package">
+<vbox>
+  <tree selected-row="0" column-visible="0|1">
+    <label>|Recipes                       |From Repo</label>
+    <variable>RecipeTree</variable>
+    <input>make_recipe_tree "'$1'"</input>
+  </tree>
+  <hbox>
+    <button>
+      <input file icon="gtk-preferences"></input>
+      <label>Configure git2package</label>
+      <action>EXIT:edit-config</action>
+    </button>
+    <button>
+      <label>Update</label>
+      <action>update_recipe_repos</action>
+    </button>
+    <button ok></button>
+    <button cancel></button>
+  </hbox>
+</vbox>
+</window>'
+
+    # Uncomment the following line to see the finished dialog in the terminal.
+    # echo "${MAIN_DIALOG}"
+    export MAIN_DIALOG
+    gtkdialog_result=$(${GTKDIALOG_COMMAND} --program=MAIN_DIALOG)
+
+    # Uncomment the following line to see any errors for debugging.
+    # echo "${gtkdialog_result}"
+    for one_var in ${gtkdialog_result}
+    do
+
+
+      if [ "${one_var#EXIT}" != "${one_var}" ]; then
+        if [ "${one_var%\"edit-config\"}" != "${one_var}" ]; then
+          exec ./edit-config
+        elif [ "${one_var%\"OK\"}" = "${one_var}" ]; then
+          exit
+        fi
+      elif [ "${one_var#RecipeTree}" != "${one_var}" ]; then
+        selected_recipe=${one_var#RecipeTree=\"}
+        selected_recipe=${selected_recipe%\"}
+      fi
+    done
+
+    if [ "${selected_recipe}" != '' ]; then
+      shift
+      configure_repo "${selected_recipe}" "$@"
+    fi
+
+  else
+  # not using gtkdialog...
+
+    counter=1
+    recipe_list=''
+    for one_recipe in $(make_recipe_tree "$1" | cut -f 1 -d '|')
+    do
+
+      one_recipe=${one_recipe%/*}
+      recipe_list="${recipe_list}${counter} ${one_recipe#recipes/}${newline}"
+
+      counter=$((counter+1))
+
+    done
+
+    #if [ "$(false)" ]; then
+    if command -v dialog >/dev/null 2>&1; then
+      exec 3>&1
+      selection=$(dialog --extra-button --extra-label "Update" \
+        --menu "Select recipe" 17 60 10 ${recipe_list} \
+        2>&1 1>&3)
+      exit_status=$?
+      exec 3>&-
+
+      if [ "${exit_status}" = "3" ]; then
+        # Update was selected...
+        update_recipe_repos
+        main "$@"
+        exit
+      fi
+    else
+      echo
+      echo "Choose recipe..."
+      echo
+      for one_token in ${recipe_list}
+      do
+        case ${one_token} in
+          [[:digit:]]*) printf "%s" "(${one_token}) " ;;
+                     *) echo "${one_token}"  ;;
+        esac
+      done
+      echo
+      echo "Enter number for selection and press <Enter>"
+      read -r selection
+    fi
+
+    selected_recipe=$(echo "${recipe_list}" \
+      | grep "^${selection} " \
+      | cut -f 2 -d ' ')
+
+    if [ "${selected_recipe}" != '' ]; then
+      shift
+      configure_repo "recipes/${selected_recipe}" "$@"
+    fi
+  fi
+}
+
+main "$@"
