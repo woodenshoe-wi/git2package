@@ -341,7 +341,7 @@ run_recipe () {
   export OUTPUT_DIR
   mkdir -p "${WORK_DIR}/${recipe_name}"
   (cd "${WORK_DIR}/${recipe_name}" || exit
-    terminal "sh ${RECIPE_DIR}/${recipe_name}/${recipe_name}.recipe \
+    terminal "sh ${RECIPE_DIR}/${recipe_name}/${recipe_name}.recipe 2>&1 \
       | tee ${OUTPUT_DIR}/${recipe_name}_$(date +'%F').log ; false"
   )
 }
