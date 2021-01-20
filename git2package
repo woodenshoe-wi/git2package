@@ -8,8 +8,11 @@ cd "${script_path%/git2package}" || exit
 export APP_DIR=${script_path%/git2package}
 parent_dir=$(realpath ..)
 
-# load config file if it exists
-[ -f ./git2package.conf ] && . ./git2package.conf
+# TERMINAL_COMMAND, GTKDIALOG_COMMAND
+# WORK_DIR and OUTPUT_DIR
+# are defined in git2package.conf
+[ ! -f ./git2package.conf ] && ./edit-config --new
+. ./git2package.conf
 
 
 terminal () {
@@ -17,9 +20,6 @@ terminal () {
   if [ "${DISPLAY}" != '' ] && [ "${TERMINAL_COMMAND}" = '' ]; then
   # If we were called from gtkdialog,
   # we have to re-source git2package.conf.
-
-    [ ! -f "${APP_DIR}/git2package.conf" ] \
-      && (cd "${APP_DIR}" || exit ; ./edit-config --new)
 
     # shellcheck source=./git2package.conf
     . "${APP_DIR}/git2package.conf"
@@ -154,6 +154,9 @@ clone_update_repo () {
           fi
 
         done < "${repos_file}"
+        default_branch=$(git branch -a | grep '/HEAD ->')
+        default_branch=${default_branch##*-> }
+        git checkout "${default_branch}" 2>/dev/null
       )
     fi
   fi
@@ -217,7 +220,7 @@ get_hash_if_commit () {
   fi
 
   branch_list=$(
-    cd "${repo_location}" || exit
+    cd "${repo_location}" 2>/dev/null || exit
     git branch -a \
       | grep -v '/HEAD ->' \
       | sed 's%[\* ]*%%' \
@@ -226,7 +229,7 @@ get_hash_if_commit () {
   if [ "$(echo "${branch_list}" | grep -x "${checkout}")" = '' ]; then
   # ${checkout} is not an existing branch,
     short_hash=$(
-      cd "${repo_location}" || exit
+      cd "${repo_location}" 2>/dev/null || exit
       git show -s --format='%h' "${checkout}" 2>/dev/null
     )
     [ "$?" = '0' ] && echo "${short_hash}"
@@ -301,7 +304,7 @@ run_recipe () {
 
   repo_state=$(
     cd "${repo_location}" || exit
-    git status | grep 'working tree clean'
+    git status | grep -E 'working (directory|tree) clean'
   )
   if [ "$repo_state" = '' ]; then
     (cd "${repo_location}" || exit
@@ -317,18 +320,21 @@ run_recipe () {
   (cd "${repo_location}" || exit
     terminal "git checkout ${checkout}"
   )
+
   repo_branch=$(
     cd "${repo_location}" || exit
-    git status --porcelain=2 --branch | grep '# branch.head'
+    git status --branch | grep -E 'HEAD detached|On branch'
   )
-  repo_branch=${repo_branch#*branch.head }
-  repo_oid=$(
+  repo_branch=${repo_branch#HEAD detached at }
+  repo_branch=${repo_branch#On branch }
+
+  repo_commit=$(
     cd "${repo_location}" || exit
-    git status --porcelain=2 --branch | grep '# branch.oid'
+    git log -n 1 --pretty=format:"%h"
   )
-  repo_oid=${repo_oid#*branch.oid }
+
   if [ "${repo_branch}" != "${checkout}" ]; then
-    if [ "$(echo "${repo_oid}" | grep -e "^${checkout}")" = '' ]; then
+    if [ "$(echo "${repo_commit}" | grep -e "^${checkout}")" = '' ]; then
       terminal "echo \"git2package: Error checking out ${checkout}\" ; false"
       return
     fi
