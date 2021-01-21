@@ -16,3 +16,5 @@ The default output directory is $HOME where the finished packages will be put al
 The locations of the source code repositories are specified with the recipes and **git2package** will offer to clone them to the same location as the **git2package** AppDir, or you can choose another location.
 
 **git2package** allows you to choose which git branch you want to compile from, or you can enter a specific commit hash.  If you are trying to compile the same branch or commit more than once, you may need to delete the temporary files in /tmp/git2package/ or wherever you set the location of the working directory.
+
+Command line usage is `./git2package [recipe name] [[branch or commit]]` if DISPLAY='' you will get ncurses dialogues if ncurses is available.

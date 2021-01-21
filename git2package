@@ -264,7 +264,7 @@ check_valid_checkout () {
   fi
 
   branch_list=$(
-    cd "${repo_location}" || exit
+    cd "${repo_location}" 2>/dev/null || exit
     git branch -a \
       | grep -v '/HEAD ->' \
       | sed 's%[\* ]*%%' \
@@ -278,7 +278,7 @@ check_valid_checkout () {
 
   # ${checkout} is not an existing branch, maybe a commit hash?
   short_hash=$(
-    cd "${repo_location}" || exit
+    cd "${repo_location}" 2>/dev/null || exit
     git show -s --format='%h' "${checkout}" 2>/dev/null
   )
   if [ "$?" = '0' ]; then
